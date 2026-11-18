@@ -1,93 +1,74 @@
-import os
 import streamlit as st
-import pandas as pd
-import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+
 st.set_page_config(page_title="Climate Stance Detector", page_icon="🌍", layout="centered")
-LABELS = ["FAVOUR", "AGAINST", "NONE"]
-INFO = {"FAVOUR": ("🟢", "Agrees that climate change is a serious concern"), "AGAINST": ("🔴", "Says climate change is not serious or is fake"), "NONE": ("⚪", "No opinion about it, or off topic")}
-EXAMPLES = ["जलवायु परिवर्तन हमारे भविष्य के लिए बहुत बड़ा खतरा है।", "ग्लोबल वार्मिंग गंभीर नहीं है।", "आज मौसम बहुत अच्छा है।", "জলবায়ু পরিবর্তন আমাদের জন্য একটি গুরুতর হুমকি।", "বৈশ্বিক উষ্ণায়ন মোটেও গুরুতর সমস্যা নয়।", "বাংলাদেশ আজ ম্যাচ জিতেছে।", "Global warming bas drama hai."]
+
 @st.cache_resource
-def load_model(path):
-    tok = AutoTokenizer.from_pretrained(path)
-    model = AutoModelForSequenceClassification.from_pretrained(path)
-    model.eval()
-    return tok, model
-def get_probs(texts, tok, model):
-    all_probs = []
-    for i in range(0, len(texts), 32):
-        batch = texts[i:i + 32]
-        enc = tok(batch, return_tensors="pt", padding=True, truncation=True, max_length=128)
-        with torch.no_grad():
-            logits = model(**enc).logits
-        probs = torch.softmax(logits, dim=-1).numpy()
-        for p in probs:
-            all_probs.append(p)
-    return all_probs
-def label_of(model, p):
-    return model.config.id2label[int(p.argmax())]
+def load_model():
+    model_path = "./stance_model"
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForSequenceClassification.from_pretrained(model_path)
+    return tokenizer, model
+
+tokenizer, model = load_model()
+
 st.title("🌍 Climate Stance Detector")
-st.write("Type a **Hindi** or **Bengali** sentence. The model tells you if it agrees that *climate change and global warming is a serious concern*.")
-path = st.sidebar.text_input("Model folder", "stance_model")
-st.sidebar.markdown("**Labels**")
-for lab in LABELS:
-    st.sidebar.write(INFO[lab][0], "**" + lab + "**", "-", INFO[lab][1])
-if not os.path.isdir(path):
-    st.error("Model folder '" + path + "' not found.")
-    st.write("Train the model in the Colab notebook, download `stance_model.zip`, unzip it next to `app.py`, then refresh this page.")
-    st.stop()
-with st.spinner("Loading model..."):
-    tok, model = load_model(path)
-tab1, tab2, tab3 = st.tabs(["Single sentence", "Many sentences (CSV)", "About"])
+st.markdown("Type a **Hindi**, **Bengali**, or **English** sentence. The model predicts if it agrees that *climate change and global warming is a serious concern*.")
+
+# Navigation tabs
+tab1, tab2 = st.tabs(["Single sentence", "Many sentences (CSV)"])
+
 with tab1:
-    pick = st.selectbox("Try an example (optional)", ["-"] + EXAMPLES)
-    text = st.text_area("Your sentence", value="" if pick == "-" else pick, height=100)
-    if st.button("Check stance", type="primary"):
-        if text.strip() == "":
-            st.warning("Please type a sentence first.")
+    st.subheader("Test a Single Sentence")
+    
+    # Text input area
+    user_input = st.text_area("Enter sentence:", height=100)
+
+    if st.button("Predict Stance", type="primary"):
+        if user_input.strip() == "":
+            st.warning("Please enter a sentence first.")
         else:
-            p = get_probs([text.strip()], tok, model)[0]
-            lab = label_of(model, p)
-            st.subheader(INFO[lab][0] + " " + lab)
-            st.write(INFO[lab][1])
-            st.write("Confidence:", str(round(float(p.max()) * 100, 1)) + "%")
-            if p.max() < 0.6:
-                st.info("The model is not very sure about this one.")
-            chart = {}
-            for i in range(len(p)):
-                chart[model.config.id2label[i]] = float(p[i])
-            st.bar_chart(pd.Series(chart))
+            with st.spinner("Analyzing stance..."):
+                inputs = tokenizer(user_input, return_tensors="pt", truncation=True, padding=True, max_length=128)
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                
+                probs = torch.softmax(outputs.logits, dim=-1)
+                pred_label = torch.argmax(probs, dim=-1).item()
+                confidence = probs[0][pred_label].item() * 100
+                
+                # Label mapping
+                labels = {0: "Against / Skeptical", 1: "Neutral", 2: "In Favor / Serious Concern"}
+                result_text = labels.get(pred_label, "Unknown")
+                
+                st.success(f"**Prediction:** {result_text} ({confidence:.2f}% confidence)")
+
 with tab2:
-    st.write("Upload a CSV file that has a column with text. You will get a table with the predicted label for each row.")
-    f = st.file_uploader("CSV file", type=["csv"])
-    if f is not None:
-        df = pd.read_csv(f)
-        col = st.selectbox("Which column has the text?", list(df.columns))
-        if st.button("Predict all"):
-            texts = df[col].astype(str).tolist()
-            bar = st.progress(0.0, text="Working...")
-            labs = []
-            confs = []
-            for i in range(0, len(texts), 32):
-                probs = get_probs(texts[i:i + 32], tok, model)
-                for p in probs:
-                    labs.append(label_of(model, p))
-                    confs.append(round(float(p.max()), 3))
-                bar.progress(min(1.0, (i + 32) / len(texts)), text="Working...")
-            bar.empty()
-            df["predicted_label"] = labs
-            df["confidence"] = confs
-            st.dataframe(df)
-            st.bar_chart(df["predicted_label"].value_counts())
-            st.download_button("Download results", df.to_csv(index=False).encode("utf-8"), "predictions.csv", "text/csv")
-with tab3:
-    st.markdown("""
-**Model:** IndicBERT v2 (`ai4bharat/IndicBERTv2-MLM-only`), fine-tuned for 3 labels. It knows 23 Indian languages, including Hindi and Bengali.
-
-**Training data:** the English GWSD dataset (8 people voted on each sentence), translated into Hindi and Bengali with NLLB-200.
-
-**Good to know**
-- The Hindi and Bengali training text is machine translated, so it can be a little unnatural.
-- Text written in English letters (like "Global warming bas drama hai") is harder for the model.
-- Very short or sarcastic sentences can be wrong. Always check the confidence.
-""")
+    st.subheader("Batch Prediction via CSV")
+    st.markdown("Upload a CSV file containing a column with text to get predictions for each row.")
+    uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+    
+    if uploaded_file is not None:
+        import pandas as pd
+        df = pd.read_csv(uploaded_file)
+        st.write("Preview of uploaded data:", df.head())
+        
+        # Let user pick which column contains the text
+        text_column = st.selectbox("Select the column containing sentences:", df.columns)
+        
+        if st.button("Run Batch Predictions"):
+            results = []
+            with st.spinner("Running predictions on CSV..."):
+                for text in df[text_column].astype(str):
+                    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=128)
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+                    probs = torch.softmax(outputs.logits, dim=-1)
+                    pred_label = torch.argmax(probs, dim=-1).item()
+                    labels = {0: "Against / Skeptical", 1: "Neutral", 2: "In Favor / Serious Concern"}
+                    results.append(labels.get(pred_label, "Unknown"))
+                
+                df["Predicted Stance"] = results
+                st.success("Batch prediction complete!")
+                st.dataframe(df)
